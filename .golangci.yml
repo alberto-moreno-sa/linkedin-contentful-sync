@@ -1,0 +1,32 @@
+version: "2"
+linters:
+  settings:
+    errcheck:
+      check-blank: true
+      exclude-functions:
+        - (github.com/joho/godotenv).Load
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - errcheck
+        source: (\.Close\(\)|defer .*\.Close\(\))
+      - linters:
+          - errcheck
+        source: godotenv\.Load
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
