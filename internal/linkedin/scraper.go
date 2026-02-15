@@ -2,221 +2,325 @@ package linkedin
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/http/cookiejar"
+	"net/url"
 	"strings"
-	"time"
-
-	"github.com/chromedp/cdproto/cdp"
-	"github.com/chromedp/cdproto/network"
-	"github.com/chromedp/chromedp"
 )
 
-// Scrape navigates to the LinkedIn recommendations page for the given username
-// and extracts all visible recommendations.
+const (
+	voyagerBaseURL    = "https://www.linkedin.com/voyager/api"
+	userAgent         = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
+		"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+	profileDecoration = "com.linkedin.voyager.dash.deco.identity.profile.TopCardSupplementary-166"
+)
+
+// voyagerClient wraps the HTTP client and CSRF token for Voyager API calls.
+type voyagerClient struct {
+	httpClient *http.Client
+	liAtCookie string
+	csrfToken  string
+}
+
+func (vc *voyagerClient) newRequest(ctx context.Context, method, url string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("csrf-token", vc.csrfToken)
+	req.Header.Set("x-restli-protocol-version", "2.0.0")
+	req.AddCookie(&http.Cookie{Name: "li_at", Value: vc.liAtCookie})
+	req.AddCookie(&http.Cookie{Name: "JSESSIONID", Value: vc.csrfToken})
+	return req, nil
+}
+
+// Scrape fetches LinkedIn recommendations for the given profile using the Voyager API.
 func Scrape(ctx context.Context, username string, liAtCookie string, verbose bool) ([]Recommendation, error) {
-	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", true),
-		chromedp.Flag("disable-gpu", true),
-		chromedp.Flag("no-sandbox", true),
-		chromedp.UserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "+
-			"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
-		chromedp.WindowSize(1920, 1080),
-	)
+	client := &http.Client{}
 
-	allocCtx, allocCancel := chromedp.NewExecAllocator(ctx, opts...)
-	defer allocCancel()
-
-	taskCtx, taskCancel := chromedp.NewContext(allocCtx)
-	defer taskCancel()
-
-	url := fmt.Sprintf("https://www.linkedin.com/in/%s/details/recommendations/", username)
-
-	// Step 1: Set cookie and navigate
-	err := chromedp.Run(taskCtx,
-		setCookie("li_at", liAtCookie, ".linkedin.com"),
-		chromedp.Navigate(url),
-		chromedp.WaitVisible(SelectorMainSection, chromedp.ByQuery),
-		chromedp.Sleep(3*time.Second),
-	)
+	// Step 1: Get JSESSIONID (CSRF token) by visiting LinkedIn
+	csrfToken, err := fetchCSRFToken(ctx, client, liAtCookie)
 	if err != nil {
-		return nil, fmt.Errorf("navigate: %w", err)
+		return nil, fmt.Errorf("csrf token: %w", err)
 	}
 
-	// Step 2: Scroll to load lazy content
-	err = chromedp.Run(taskCtx, scrollToBottom())
+	vc := &voyagerClient{
+		httpClient: client,
+		liAtCookie: liAtCookie,
+		csrfToken:  csrfToken,
+	}
+
+	// Step 2: Resolve profile URN via /me
+	profileURN, err := vc.fetchProfileURN(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("scroll: %w", err)
+		return nil, fmt.Errorf("profile URN: %w", err)
 	}
+	log.Printf("Resolved profile URN: %s", profileURN)
 
-	// Step 3: Expand all "Show more" buttons
-	err = chromedp.Run(taskCtx,
-		chromedp.Sleep(2*time.Second),
-		expandAllShowMore(),
-	)
-	if err != nil {
-		log.Println("WARNING: could not expand all 'Show more' buttons:", err)
-	}
+	// Step 3: Fetch recommendations via dash API
+	encodedURN := url.QueryEscape(profileURN)
+	endpoint := fmt.Sprintf("%s/identity/dash/recommendations?q=received&profileUrn=%s&recommendationStatuses=List(VISIBLE)",
+		voyagerBaseURL, encodedURN)
 
-	// Step 4: Try CSS selector extraction
-	recs, err := extractWithSelectors(taskCtx)
-	if err != nil {
-		log.Println("WARNING: CSS selector extraction failed:", err)
-	}
-
-	// Step 5: Fallback to JavaScript extraction if selectors returned nothing
-	if len(recs) == 0 {
-		log.Println("CSS selectors returned 0 results, trying JavaScript fallback...")
-		recs, err = extractWithJS(taskCtx)
-		if err != nil {
-			return nil, fmt.Errorf("JS fallback extraction: %w", err)
-		}
-	}
-
-	// Step 6: Dump page HTML in verbose mode if still no results
-	if len(recs) == 0 && verbose {
-		var html string
-		_ = chromedp.Run(taskCtx, chromedp.OuterHTML("html", &html))
-		log.Println("=== PAGE HTML (verbose debug) ===")
-		log.Println(html[:min(len(html), 5000)])
-		log.Println("=== END HTML ===")
-	}
-
-	return recs, nil
-}
-
-func setCookie(name, value, domain string) chromedp.ActionFunc {
-	return chromedp.ActionFunc(func(ctx context.Context) error {
-		expr := cdp.TimeSinceEpoch(time.Now().Add(365 * 24 * time.Hour))
-		return network.SetCookie(name, value).
-			WithDomain(domain).
-			WithPath("/").
-			WithHTTPOnly(true).
-			WithSecure(true).
-			WithExpires(&expr).
-			Do(ctx)
-	})
-}
-
-func scrollToBottom() chromedp.ActionFunc {
-	return chromedp.ActionFunc(func(ctx context.Context) error {
-		for i := 0; i < 10; i++ {
-			if err := chromedp.Evaluate(`window.scrollBy(0, 800)`, nil).Do(ctx); err != nil {
-				return err
-			}
-			time.Sleep(500 * time.Millisecond)
-		}
-		return nil
-	})
-}
-
-func expandAllShowMore() chromedp.ActionFunc {
-	return chromedp.ActionFunc(func(ctx context.Context) error {
-		var nodes []*cdp.Node
-		err := chromedp.Nodes(SelectorShowMore, &nodes,
-			chromedp.ByQueryAll, chromedp.AtLeast(0)).Do(ctx)
-		if err != nil || len(nodes) == 0 {
-			return nil
-		}
-		for _, node := range nodes {
-			_ = chromedp.MouseClickNode(node).Do(ctx)
-			time.Sleep(300 * time.Millisecond)
-		}
-		return nil
-	})
-}
-
-func extractWithSelectors(ctx context.Context) ([]Recommendation, error) {
-	var items []*cdp.Node
-	err := chromedp.Nodes(SelectorRecommendationItem, &items,
-		chromedp.ByQueryAll, chromedp.AtLeast(0)).Do(ctx)
+	req, err := vc.newRequest(ctx, "GET", endpoint)
 	if err != nil {
 		return nil, err
 	}
 
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("voyager request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("voyager API returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result dashRecommendationsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode voyager response: %w", err)
+	}
+
+	// Step 4: Enrich each recommendation with recommender profile data
 	var recs []Recommendation
-	for _, item := range items {
-		rec := extractSingle(ctx, item)
+	for _, elem := range result.Elements {
+		if elem.RecommendationText == "" {
+			continue
+		}
+
+		rec := Recommendation{
+			Quote: elem.RecommendationText,
+		}
+
+		// Fetch recommender's profile details
+		if elem.RecommenderProfileURN != "" {
+			profile, err := vc.fetchProfile(ctx, elem.RecommenderProfileURN)
+			if err != nil {
+				log.Printf("WARNING: could not fetch profile for recommender: %v", err)
+			} else {
+				rec.Name = strings.TrimSpace(profile.FirstName + " " + profile.LastName)
+				rec.Role = profile.Headline
+				if profile.PublicIdentifier != "" {
+					rec.LinkedInURL = "https://www.linkedin.com/in/" + profile.PublicIdentifier
+				}
+				rec.AvatarURL = extractAvatarURL(profile.ProfilePicture)
+			}
+
+			// Fetch company separately (requires decoration)
+			company, err := vc.fetchCompanyByURN(ctx, elem.RecommenderProfileURN)
+			if err != nil {
+				log.Printf("WARNING: could not fetch company for %s: %v", rec.Name, err)
+			} else {
+				rec.Company = company
+			}
+		}
+
 		if rec.Name != "" && rec.Quote != "" {
 			recs = append(recs, rec)
 		}
 	}
+
 	return recs, nil
 }
 
-func extractSingle(ctx context.Context, node *cdp.Node) Recommendation {
-	var rec Recommendation
-
-	var name string
-	if err := chromedp.Text(SelectorName, &name,
-		chromedp.ByQuery, chromedp.FromNode(node)).Do(ctx); err == nil {
-		rec.Name = strings.TrimSpace(name)
+// fetchProfileURN calls /me to get the logged-in user's profile URN.
+func (vc *voyagerClient) fetchProfileURN(ctx context.Context) (string, error) {
+	req, err := vc.newRequest(ctx, "GET", voyagerBaseURL+"/me")
+	if err != nil {
+		return "", err
 	}
 
-	var headline string
-	if err := chromedp.Text(SelectorHeadline, &headline,
-		chromedp.ByQuery, chromedp.FromNode(node)).Do(ctx); err == nil {
-		rec.Role, rec.Company = parseHeadline(strings.TrimSpace(headline))
+	resp, err := vc.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("fetch /me: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("/me returned %d: %s", resp.StatusCode, string(body))
 	}
 
-	var quote string
-	if err := chromedp.Text(SelectorQuote, &quote,
-		chromedp.ByQuery, chromedp.FromNode(node)).Do(ctx); err == nil {
-		rec.Quote = strings.TrimSpace(quote)
+	var result struct {
+		MiniProfile struct {
+			DashEntityURN string `json:"dashEntityUrn"`
+		} `json:"miniProfile"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode /me: %w", err)
 	}
 
-	var avatarURL string
-	var ok bool
-	if err := chromedp.AttributeValue(SelectorAvatar, "src", &avatarURL, &ok,
-		chromedp.ByQuery, chromedp.FromNode(node)).Do(ctx); err == nil && ok {
-		rec.AvatarURL = avatarURL
+	if result.MiniProfile.DashEntityURN == "" {
+		return "", fmt.Errorf("dashEntityUrn not found in /me response")
 	}
 
-	return rec
+	return result.MiniProfile.DashEntityURN, nil
 }
 
-type jsResult struct {
-	Name      string `json:"name"`
-	Headline  string `json:"headline"`
-	Quote     string `json:"quote"`
-	AvatarURL string `json:"avatarUrl"`
-}
+// fetchProfile fetches a profile by URN (no decoration) to get basic info.
+func (vc *voyagerClient) fetchProfile(ctx context.Context, profileURN string) (*dashProfile, error) {
+	encodedURN := url.PathEscape(profileURN)
+	endpoint := fmt.Sprintf("%s/identity/dash/profiles/%s", voyagerBaseURL, encodedURN)
 
-func extractWithJS(ctx context.Context) ([]Recommendation, error) {
-	var results []jsResult
-	err := chromedp.Evaluate(JSExtractFallback, &results).Do(ctx)
+	req, err := vc.newRequest(ctx, "GET", endpoint)
 	if err != nil {
 		return nil, err
 	}
 
-	var recs []Recommendation
-	for _, r := range results {
-		role, company := parseHeadline(r.Headline)
-		recs = append(recs, Recommendation{
-			Name:      r.Name,
-			Role:      role,
-			Company:   company,
-			Quote:     r.Quote,
-			AvatarURL: r.AvatarURL,
-		})
+	resp, err := vc.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch profile: %w", err)
 	}
-	return recs, nil
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("profile API returned %d", resp.StatusCode)
+	}
+
+	var profile dashProfile
+	if err := json.NewDecoder(resp.Body).Decode(&profile); err != nil {
+		return nil, fmt.Errorf("decode profile: %w", err)
+	}
+
+	return &profile, nil
 }
 
-// parseHeadline splits "Engineering Manager at Google" into role and company.
-func parseHeadline(headline string) (role, company string) {
-	for _, sep := range []string{" at ", " @ "} {
-		lower := strings.ToLower(headline)
-		if idx := strings.LastIndex(lower, sep); idx != -1 {
-			return strings.TrimSpace(headline[:idx]),
-				strings.TrimSpace(headline[idx+len(sep):])
+// fetchCompanyByURN fetches company name from a profile URN using TopCardSupplementary decoration.
+func (vc *voyagerClient) fetchCompanyByURN(ctx context.Context, profileURN string) (string, error) {
+	encodedURN := url.PathEscape(profileURN)
+	endpoint := fmt.Sprintf("%s/identity/dash/profiles/%s?decorationId=%s",
+		voyagerBaseURL, encodedURN, profileDecoration)
+
+	req, err := vc.newRequest(ctx, "GET", endpoint)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := vc.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("fetch decorated profile: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("decorated profile API returned %d", resp.StatusCode)
+	}
+
+	var result struct {
+		ProfileTopPosition struct {
+			Elements []struct {
+				CompanyName string `json:"companyName"`
+			} `json:"elements"`
+		} `json:"profileTopPosition"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode decorated profile: %w", err)
+	}
+
+	positions := result.ProfileTopPosition.Elements
+	if len(positions) > 0 && positions[0].CompanyName != "" {
+		return positions[0].CompanyName, nil
+	}
+
+	return "", nil
+}
+
+// extractAvatarURL picks the best avatar URL from a dashProfile's ProfilePicture.
+func extractAvatarURL(pic *dashProfilePicture) string {
+	if pic == nil || pic.DisplayImage == nil || pic.DisplayImage.VectorImage == nil {
+		return ""
+	}
+	vi := pic.DisplayImage.VectorImage
+	if vi.RootURL == "" || len(vi.Artifacts) == 0 {
+		return ""
+	}
+
+	bestPath := ""
+	for _, a := range vi.Artifacts {
+		if bestPath == "" {
+			bestPath = a.FileIdentifyingURLPathSegment
+		}
+		if a.Width == 200 {
+			bestPath = a.FileIdentifyingURLPathSegment
+			break
+		}
+	}
+	if bestPath == "" {
+		return ""
+	}
+	return vi.RootURL + bestPath
+}
+
+// fetchCSRFToken makes a GET to linkedin.com to obtain the JSESSIONID cookie.
+// Uses a cookie jar to accumulate cookies across redirects.
+func fetchCSRFToken(ctx context.Context, _ *http.Client, liAtCookie string) (string, error) {
+	jar, _ := cookiejar.New(nil)
+	jarClient := &http.Client{Jar: jar}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://www.linkedin.com/", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.AddCookie(&http.Cookie{Name: "li_at", Value: liAtCookie})
+
+	resp, err := jarClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("fetch linkedin.com: %w", err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+
+	// Check cookies accumulated in the jar across all redirects
+	for _, cookie := range jar.Cookies(req.URL) {
+		if cookie.Name == "JSESSIONID" {
+			return cookie.Value, nil
 		}
 	}
 
-	parts := strings.SplitN(headline, ",", 2)
-	if len(parts) == 2 {
-		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
-	}
+	return "", fmt.Errorf("JSESSIONID cookie not found — li_at cookie may be expired")
+}
 
-	return strings.TrimSpace(headline), ""
+// --- Response types for the dash API ---
+
+type dashRecommendationsResponse struct {
+	Elements []dashRecommendation `json:"elements"`
+}
+
+type dashRecommendation struct {
+	RecommendationText   string `json:"recommendationText"`
+	RecommenderProfileURN string `json:"recommenderProfileUrn"`
+}
+
+type dashProfile struct {
+	FirstName        string               `json:"firstName"`
+	LastName         string               `json:"lastName"`
+	Headline         string               `json:"headline"`
+	PublicIdentifier string               `json:"publicIdentifier"`
+	ProfilePicture   *dashProfilePicture  `json:"profilePicture"`
+}
+
+type dashProfilePicture struct {
+	DisplayImage *dashDisplayImage `json:"displayImage"`
+}
+
+type dashDisplayImage struct {
+	VectorImage *dashVectorImage `json:"vectorImage"`
+}
+
+type dashVectorImage struct {
+	RootURL   string         `json:"rootUrl"`
+	Artifacts []dashArtifact `json:"artifacts"`
+}
+
+type dashArtifact struct {
+	Width                        int    `json:"width"`
+	FileIdentifyingURLPathSegment string `json:"fileIdentifyingUrlPathSegment"`
 }

@@ -10,7 +10,8 @@ import (
 // Merge combines existing Contentful testimonials with newly scraped
 // LinkedIn recommendations. Deduplication uses a composite key of
 // normalized (lowercased, trimmed) name + company.
-func Merge(existing []contentful.Testimonial, scraped []linkedin.Recommendation) ([]contentful.Testimonial, int) {
+// Returns the full merged list and the indices of newly added testimonials.
+func Merge(existing []contentful.Testimonial, scraped []linkedin.Recommendation) ([]contentful.Testimonial, []int) {
 	seen := make(map[string]bool, len(existing))
 	for _, t := range existing {
 		seen[dedupeKey(t.Name, t.Company)] = true
@@ -19,24 +20,25 @@ func Merge(existing []contentful.Testimonial, scraped []linkedin.Recommendation)
 	result := make([]contentful.Testimonial, len(existing))
 	copy(result, existing)
 
-	newCount := 0
+	var newIndices []int
 	for _, rec := range scraped {
 		key := dedupeKey(rec.Name, rec.Company)
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
+		newIndices = append(newIndices, len(result))
 		result = append(result, contentful.Testimonial{
-			Name:      rec.Name,
-			Role:      rec.Role,
-			Company:   rec.Company,
-			Quote:     rec.Quote,
-			AvatarURL: rec.AvatarURL,
+			Name:        rec.Name,
+			Role:        rec.Role,
+			Company:     rec.Company,
+			Quote:       rec.Quote,
+			AvatarURL:   rec.AvatarURL,
+			LinkedInURL: rec.LinkedInURL,
 		})
-		newCount++
 	}
 
-	return result, newCount
+	return result, newIndices
 }
 
 func dedupeKey(name, company string) string {

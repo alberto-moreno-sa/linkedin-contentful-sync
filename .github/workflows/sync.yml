@@ -1,0 +1,50 @@
+name: Sync LinkedIn Recommendations
+
+on:
+  workflow_dispatch:
+    inputs:
+      linkedin_cookie:
+        description: "LinkedIn li_at cookie value"
+        required: true
+        type: string
+      translate:
+        description: "Translate quotes to English"
+        required: false
+        type: boolean
+        default: true
+      force:
+        description: "Replace all existing testimonials"
+        required: false
+        type: boolean
+        default: false
+      profile:
+        description: "LinkedIn username"
+        required: false
+        type: string
+        default: "alberthiggs"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Sync recommendations
+        env:
+          CONTENTFUL_SPACE_ID: ${{ secrets.CONTENTFUL_SPACE_ID }}
+          CONTENTFUL_CMA_TOKEN: ${{ secrets.CONTENTFUL_CMA_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          LINKEDIN_COOKIE: ${{ inputs.linkedin_cookie }}
+        run: |
+          FLAGS="--profile=${{ inputs.profile }}"
+          if [ "${{ inputs.translate }}" = "true" ]; then
+            FLAGS="$FLAGS --translate"
+          fi
+          if [ "${{ inputs.force }}" = "true" ]; then
+            FLAGS="$FLAGS --force"
+          fi
+          go run . scrape $FLAGS

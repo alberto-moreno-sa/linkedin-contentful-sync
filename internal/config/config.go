@@ -9,6 +9,7 @@ type Config struct {
 	SpaceID        string
 	CMAToken       string
 	LinkedInCookie string
+	GeminiAPIKey   string
 }
 
 // Load loads all config including LinkedIn cookie (for scrape command).
@@ -22,6 +23,8 @@ func Load() (*Config, error) {
 	if cfg.LinkedInCookie == "" {
 		return nil, fmt.Errorf("LINKEDIN_COOKIE (li_at value) is required")
 	}
+
+	cfg.GeminiAPIKey = os.Getenv("GEMINI_API_KEY")
 
 	return cfg, nil
 }

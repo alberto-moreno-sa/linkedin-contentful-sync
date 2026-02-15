@@ -10,10 +10,13 @@ import (
 	"github.com/alberto-moreno-sa/linkedin-contentful-sync/internal/contentful"
 	"github.com/alberto-moreno-sa/linkedin-contentful-sync/internal/linkedin"
 	"github.com/alberto-moreno-sa/linkedin-contentful-sync/internal/sync"
+	"github.com/alberto-moreno-sa/linkedin-contentful-sync/internal/translate"
 	"github.com/spf13/cobra"
 )
 
 var profileFlag string
+var translateFlag bool
+var forceFlag bool
 
 var scrapeCmd = &cobra.Command{
 	Use:   "scrape",
@@ -44,6 +47,23 @@ var scrapeCmd = &cobra.Command{
 			return nil
 		}
 
+		// Step 1.5: Translate quotes to English if requested
+		if translateFlag {
+			if cfg.GeminiAPIKey == "" {
+				return fmt.Errorf("GEMINI_API_KEY is required when using --translate")
+			}
+			log.Println("Translating quotes to English...")
+			for i := range scraped {
+				translated, err := translate.ToEnglish(ctx, cfg.GeminiAPIKey, scraped[i].Quote)
+				if err != nil {
+					log.Printf("WARNING: translation failed for %s: %v", scraped[i].Name, err)
+					continue
+				}
+				log.Printf("Translated quote for %s", scraped[i].Name)
+				scraped[i].Quote = translated
+			}
+		}
+
 		// Step 2: Fetch existing testimonials from Contentful
 		cmaClient := contentful.NewClient(cfg.SpaceID, cfg.CMAToken)
 		result, err := cmaClient.GetTestimonials(ctx)
@@ -52,21 +72,70 @@ var scrapeCmd = &cobra.Command{
 		}
 		log.Printf("Existing testimonials: %d\n", len(result.Testimonials))
 
-		// Step 3: Merge
-		merged, newCount := sync.Merge(result.Testimonials, scraped)
-		if newCount == 0 {
-			log.Println("No new recommendations to add. Everything is up to date.")
-			return nil
-		}
-		log.Printf("Adding %d new recommendations (total: %d)\n", newCount, len(merged))
+		// Step 3: Merge (or replace if --force)
+		var merged []contentful.Testimonial
+		var newIndices []int
 
-		// Step 4: Update + Publish
-		newVersion, err := cmaClient.UpdateTestimonials(ctx, result, merged)
-		if err != nil {
-			return fmt.Errorf("contentful update: %w", err)
+		if forceFlag {
+			log.Println("Force mode: replacing all testimonials")
+			for i, rec := range scraped {
+				newIndices = append(newIndices, i)
+				merged = append(merged, contentful.Testimonial{
+					Name:        rec.Name,
+					Role:        rec.Role,
+					Company:     rec.Company,
+					Quote:       rec.Quote,
+					AvatarURL:   rec.AvatarURL,
+					LinkedInURL: rec.LinkedInURL,
+				})
+			}
+		} else {
+			merged, newIndices = sync.Merge(result.Testimonials, scraped)
+			if len(newIndices) == 0 {
+				log.Println("No new recommendations to add. Everything is up to date.")
+				return nil
+			}
+		}
+		log.Printf("Syncing %d recommendations (new: %d)\n", len(merged), len(newIndices))
+
+		// Step 3.5: Upload avatars for new recommendations
+		for _, idx := range newIndices {
+			t := &merged[idx]
+			if t.AvatarURL == "" {
+				continue
+			}
+			log.Printf("Uploading avatar for %s...", t.Name)
+			cdnURL, err := cmaClient.UploadAvatar(ctx, t.AvatarURL, t.Name)
+			if err != nil {
+				log.Printf("WARNING: avatar upload failed for %s: %v", t.Name, err)
+				t.AvatarURL = ""
+				continue
+			}
+			t.AvatarURL = cdnURL
+			log.Printf("Avatar uploaded: %s", cdnURL)
 		}
 
-		err = cmaClient.PublishEntry(ctx, result.EntryID, newVersion)
+		// Step 4: Create or Update + Publish
+		var entryID string
+		var newVersion int
+
+		if result.EntryID == "" {
+			// Entry doesn't exist yet — create it
+			log.Println("Creating new testimonials entry in Contentful...")
+			entryID, newVersion, err = cmaClient.CreateTestimonials(ctx, merged)
+			if err != nil {
+				return fmt.Errorf("contentful create: %w", err)
+			}
+		} else {
+			// Entry exists — update it
+			entryID = result.EntryID
+			newVersion, err = cmaClient.UpdateTestimonials(ctx, result, merged)
+			if err != nil {
+				return fmt.Errorf("contentful update: %w", err)
+			}
+		}
+
+		err = cmaClient.PublishEntry(ctx, entryID, newVersion)
 		if err != nil {
 			return fmt.Errorf("contentful publish: %w", err)
 		}
@@ -78,5 +147,7 @@ var scrapeCmd = &cobra.Command{
 
 func init() {
 	scrapeCmd.Flags().StringVar(&profileFlag, "profile", "", "LinkedIn username (e.g. alberthiggs)")
+	scrapeCmd.Flags().BoolVar(&translateFlag, "translate", false, "Translate quotes to English using Gemini")
+	scrapeCmd.Flags().BoolVar(&forceFlag, "force", false, "Replace all existing testimonials instead of merging")
 	rootCmd.AddCommand(scrapeCmd)
 }
