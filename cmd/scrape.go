@@ -114,7 +114,7 @@ var scrapeCmd = &cobra.Command{
 				continue
 			}
 			t.AvatarURL = cdnURL
-			log.Printf("Avatar uploaded: %s", cdnURL)
+			log.Printf("Avatar uploaded for %s: ok", t.Name)
 		}
 
 		// Step 4: Create or Update + Publish
