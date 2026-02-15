@@ -20,7 +20,6 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           version: v2.9.0
-          install-mode: goinstall
 
   build:
     runs-on: ubuntu-latest
