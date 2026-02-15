@@ -79,7 +79,10 @@ func Scrape(ctx context.Context, username string, liAtCookie string, verbose boo
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("voyager API returned %d: could not read body: %w", resp.StatusCode, err)
+		}
 		return nil, fmt.Errorf("voyager API returned %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -144,7 +147,10 @@ func (vc *voyagerClient) fetchProfileURN(ctx context.Context) (string, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return "", fmt.Errorf("/me returned %d: could not read body: %w", resp.StatusCode, err)
+		}
 		return "", fmt.Errorf("/me returned %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -261,7 +267,10 @@ func extractAvatarURL(pic *dashProfilePicture) string {
 // fetchCSRFToken makes a GET to linkedin.com to obtain the JSESSIONID cookie.
 // Uses a cookie jar to accumulate cookies across redirects.
 func fetchCSRFToken(ctx context.Context, _ *http.Client, liAtCookie string) (string, error) {
-	jar, _ := cookiejar.New(nil)
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return "", fmt.Errorf("create cookie jar: %w", err)
+	}
 	jarClient := &http.Client{Jar: jar}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", "https://www.linkedin.com/", nil)
@@ -276,7 +285,9 @@ func fetchCSRFToken(ctx context.Context, _ *http.Client, liAtCookie string) (str
 		return "", fmt.Errorf("fetch linkedin.com: %w", err)
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return "", fmt.Errorf("drain response body: %w", err)
+	}
 
 	// Check cookies accumulated in the jar across all redirects
 	for _, cookie := range jar.Cookies(req.URL) {

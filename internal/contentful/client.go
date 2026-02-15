@@ -48,7 +48,10 @@ func (c *Client) GetTestimonials(ctx context.Context) (*TestimonialsResult, erro
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("CMA query failed (%d): could not read body: %w", resp.StatusCode, err)
+		}
 		return nil, fmt.Errorf("CMA query failed (%d): %s", resp.StatusCode, string(body))
 	}
 
@@ -144,7 +147,10 @@ func (c *Client) UpdateTestimonials(ctx context.Context, result *TestimonialsRes
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return 0, fmt.Errorf("CMA update failed (%d): could not read body: %w", resp.StatusCode, err)
+		}
 		return 0, fmt.Errorf("CMA update failed (%d): %s", resp.StatusCode, string(respBody))
 	}
 
@@ -188,7 +194,10 @@ func (c *Client) CreateTestimonials(ctx context.Context, testimonials []Testimon
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 201 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return "", 0, fmt.Errorf("CMA create failed (%d): could not read body: %w", resp.StatusCode, err)
+		}
 		return "", 0, fmt.Errorf("CMA create failed (%d): %s", resp.StatusCode, string(respBody))
 	}
 
@@ -244,7 +253,10 @@ func (c *Client) UploadAvatar(ctx context.Context, imageURL, name string) (strin
 	defer uploadResp.Body.Close()
 
 	if uploadResp.StatusCode != 201 {
-		body, _ := io.ReadAll(uploadResp.Body)
+		body, err := io.ReadAll(uploadResp.Body)
+		if err != nil {
+			return "", fmt.Errorf("upload failed (%d): could not read body: %w", uploadResp.StatusCode, err)
+		}
 		return "", fmt.Errorf("upload failed (%d): %s", uploadResp.StatusCode, string(body))
 	}
 
@@ -296,7 +308,10 @@ func (c *Client) UploadAvatar(ctx context.Context, imageURL, name string) (strin
 	defer assetResp.Body.Close()
 
 	if assetResp.StatusCode != 201 {
-		body, _ := io.ReadAll(assetResp.Body)
+		body, err := io.ReadAll(assetResp.Body)
+		if err != nil {
+			return "", fmt.Errorf("create asset failed (%d): could not read body: %w", assetResp.StatusCode, err)
+		}
 		return "", fmt.Errorf("create asset failed (%d): %s", assetResp.StatusCode, string(body))
 	}
 
@@ -347,7 +362,10 @@ func (c *Client) UploadAvatar(ctx context.Context, imageURL, name string) (strin
 			Sys    servicekit.EntrySys    `json:"sys"`
 			Fields map[string]interface{} `json:"fields"`
 		}
-		json.NewDecoder(getResp.Body).Decode(&polled)
+		if err := json.NewDecoder(getResp.Body).Decode(&polled); err != nil {
+			getResp.Body.Close()
+			continue
+		}
 		getResp.Body.Close()
 
 		if fileField, ok := polled.Fields["file"]; ok {
@@ -417,7 +435,10 @@ func (c *Client) publishAsset(ctx context.Context, assetID string, version int) 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("CMA asset publish failed (%d): could not read body: %w", resp.StatusCode, err)
+		}
 		return fmt.Errorf("CMA asset publish failed (%d): %s", resp.StatusCode, string(body))
 	}
 
