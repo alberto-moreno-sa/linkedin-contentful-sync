@@ -10,27 +10,25 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	servicekit "github.com/alberto-moreno-sa/go-service-kit/contentful"
 )
 
-const cmaBaseURL = "https://api.contentful.com"
-
+// Client embeds the SDK client and adds testimonial-specific methods.
 type Client struct {
-	spaceID    string
-	token      string
-	httpClient *http.Client
+	*servicekit.Client
 }
 
+// NewClient creates a new Contentful client with SDK and testimonial support.
 func NewClient(spaceID, token string) *Client {
 	return &Client{
-		spaceID:    spaceID,
-		token:      token,
-		httpClient: &http.Client{},
+		Client: servicekit.NewClient(spaceID, token),
 	}
 }
 
 // GetTestimonials fetches the testimonials siteSection entry.
 func (c *Client) GetTestimonials(ctx context.Context) (*TestimonialsResult, error) {
-	endpoint := fmt.Sprintf("%s/spaces/%s/environments/master/entries", cmaBaseURL, c.spaceID)
+	endpoint := fmt.Sprintf("%s/spaces/%s/environments/master/entries", servicekit.CMABaseURL, c.SpaceID)
 
 	params := url.Values{}
 	params.Set("content_type", "siteSection")
@@ -41,9 +39,9 @@ func (c *Client) GetTestimonials(ctx context.Context) (*TestimonialsResult, erro
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Authorization", "Bearer "+c.Token)
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -54,7 +52,7 @@ func (c *Client) GetTestimonials(ctx context.Context) (*TestimonialsResult, erro
 		return nil, fmt.Errorf("CMA query failed (%d): %s", resp.StatusCode, string(body))
 	}
 
-	var result entriesResponse
+	var result servicekit.EntriesResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
@@ -65,7 +63,6 @@ func (c *Client) GetTestimonials(ctx context.Context) (*TestimonialsResult, erro
 
 	entry := result.Items[0]
 
-	// Extract testimonials from the locale-wrapped content field
 	contentField, ok := entry.Fields["content"]
 	if !ok {
 		return &TestimonialsResult{
@@ -84,7 +81,6 @@ func (c *Client) GetTestimonials(ctx context.Context) (*TestimonialsResult, erro
 		}, fmt.Errorf("content field is not locale-wrapped")
 	}
 
-	// Try en-US locale (Contentful default)
 	rawContent, ok := localeMap["en-US"]
 	if !ok {
 		for _, v := range localeMap {
@@ -112,12 +108,10 @@ func (c *Client) GetTestimonials(ctx context.Context) (*TestimonialsResult, erro
 }
 
 // UpdateTestimonials updates the testimonials entry using the fetch-mutate-put pattern.
-// It preserves all existing fields and only replaces the content field.
 func (c *Client) UpdateTestimonials(ctx context.Context, result *TestimonialsResult, testimonials []Testimonial) (int, error) {
 	endpoint := fmt.Sprintf("%s/spaces/%s/environments/master/entries/%s",
-		cmaBaseURL, c.spaceID, result.EntryID)
+		servicekit.CMABaseURL, c.SpaceID, result.EntryID)
 
-	// Clone raw fields and replace only the content
 	fields := make(map[string]interface{})
 	for k, v := range result.RawFields {
 		fields[k] = v
@@ -139,11 +133,11 @@ func (c *Client) UpdateTestimonials(ctx context.Context, result *TestimonialsRes
 	if err != nil {
 		return 0, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Content-Type", "application/vnd.contentful.management.v1+json")
 	req.Header.Set("X-Contentful-Version", fmt.Sprintf("%d", result.Version))
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -154,7 +148,7 @@ func (c *Client) UpdateTestimonials(ctx context.Context, result *TestimonialsRes
 		return 0, fmt.Errorf("CMA update failed (%d): %s", resp.StatusCode, string(respBody))
 	}
 
-	var updated entryItem
+	var updated servicekit.EntryItem
 	if err := json.NewDecoder(resp.Body).Decode(&updated); err != nil {
 		return 0, fmt.Errorf("decode update response: %w", err)
 	}
@@ -164,7 +158,7 @@ func (c *Client) UpdateTestimonials(ctx context.Context, result *TestimonialsRes
 
 // CreateTestimonials creates a new siteSection entry for testimonials.
 func (c *Client) CreateTestimonials(ctx context.Context, testimonials []Testimonial) (string, int, error) {
-	endpoint := fmt.Sprintf("%s/spaces/%s/environments/master/entries", cmaBaseURL, c.spaceID)
+	endpoint := fmt.Sprintf("%s/spaces/%s/environments/master/entries", servicekit.CMABaseURL, c.SpaceID)
 
 	body := map[string]interface{}{
 		"fields": map[string]interface{}{
@@ -183,11 +177,11 @@ func (c *Client) CreateTestimonials(ctx context.Context, testimonials []Testimon
 	if err != nil {
 		return "", 0, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Content-Type", "application/vnd.contentful.management.v1+json")
 	req.Header.Set("X-Contentful-Content-Type", "siteSection")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
 		return "", 0, err
 	}
@@ -198,7 +192,7 @@ func (c *Client) CreateTestimonials(ctx context.Context, testimonials []Testimon
 		return "", 0, fmt.Errorf("CMA create failed (%d): %s", resp.StatusCode, string(respBody))
 	}
 
-	var created entryItem
+	var created servicekit.EntryItem
 	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
 		return "", 0, fmt.Errorf("decode create response: %w", err)
 	}
@@ -209,12 +203,11 @@ func (c *Client) CreateTestimonials(ctx context.Context, testimonials []Testimon
 // UploadAvatar downloads an image from imageURL, uploads it to Contentful as an asset,
 // processes and publishes it, and returns the CDN URL.
 func (c *Client) UploadAvatar(ctx context.Context, imageURL, name string) (string, error) {
-	// Step 1: Download the image
 	imgReq, err := http.NewRequestWithContext(ctx, "GET", imageURL, nil)
 	if err != nil {
 		return "", fmt.Errorf("create image request: %w", err)
 	}
-	imgResp, err := c.httpClient.Do(imgReq)
+	imgResp, err := c.HTTPClient.Do(imgReq)
 	if err != nil {
 		return "", fmt.Errorf("download image: %w", err)
 	}
@@ -236,16 +229,15 @@ func (c *Client) UploadAvatar(ctx context.Context, imageURL, name string) (strin
 
 	fileName := slugify(name) + extForContentType(contentType)
 
-	// Step 2: Upload binary to Contentful (upload API uses a different host)
-	uploadEndpoint := fmt.Sprintf("https://upload.contentful.com/spaces/%s/uploads", c.spaceID)
+	uploadEndpoint := fmt.Sprintf("https://upload.contentful.com/spaces/%s/uploads", c.SpaceID)
 	uploadReq, err := http.NewRequestWithContext(ctx, "POST", uploadEndpoint, bytes.NewReader(imgData))
 	if err != nil {
 		return "", err
 	}
-	uploadReq.Header.Set("Authorization", "Bearer "+c.token)
+	uploadReq.Header.Set("Authorization", "Bearer "+c.Token)
 	uploadReq.Header.Set("Content-Type", "application/octet-stream")
 
-	uploadResp, err := c.httpClient.Do(uploadReq)
+	uploadResp, err := c.HTTPClient.Do(uploadReq)
 	if err != nil {
 		return "", fmt.Errorf("upload binary: %w", err)
 	}
@@ -265,8 +257,7 @@ func (c *Client) UploadAvatar(ctx context.Context, imageURL, name string) (strin
 		return "", fmt.Errorf("decode upload: %w", err)
 	}
 
-	// Step 3: Create asset referencing the upload
-	assetEndpoint := fmt.Sprintf("%s/spaces/%s/environments/master/assets", cmaBaseURL, c.spaceID)
+	assetEndpoint := fmt.Sprintf("%s/spaces/%s/environments/master/assets", servicekit.CMABaseURL, c.SpaceID)
 	assetBody := map[string]interface{}{
 		"fields": map[string]interface{}{
 			"title": map[string]interface{}{"en-US": name + " avatar"},
@@ -295,10 +286,10 @@ func (c *Client) UploadAvatar(ctx context.Context, imageURL, name string) (strin
 	if err != nil {
 		return "", err
 	}
-	assetReq.Header.Set("Authorization", "Bearer "+c.token)
+	assetReq.Header.Set("Authorization", "Bearer "+c.Token)
 	assetReq.Header.Set("Content-Type", "application/vnd.contentful.management.v1+json")
 
-	assetResp, err := c.httpClient.Do(assetReq)
+	assetResp, err := c.HTTPClient.Do(assetReq)
 	if err != nil {
 		return "", fmt.Errorf("create asset: %w", err)
 	}
@@ -309,22 +300,21 @@ func (c *Client) UploadAvatar(ctx context.Context, imageURL, name string) (strin
 		return "", fmt.Errorf("create asset failed (%d): %s", assetResp.StatusCode, string(body))
 	}
 
-	var assetResult entryItem
+	var assetResult servicekit.EntryItem
 	if err := json.NewDecoder(assetResp.Body).Decode(&assetResult); err != nil {
 		return "", fmt.Errorf("decode asset: %w", err)
 	}
 
-	// Step 4: Process the asset
 	processEndpoint := fmt.Sprintf("%s/spaces/%s/environments/master/assets/%s/files/en-US/process",
-		cmaBaseURL, c.spaceID, assetResult.Sys.ID)
+		servicekit.CMABaseURL, c.SpaceID, assetResult.Sys.ID)
 	processReq, err := http.NewRequestWithContext(ctx, "PUT", processEndpoint, nil)
 	if err != nil {
 		return "", err
 	}
-	processReq.Header.Set("Authorization", "Bearer "+c.token)
+	processReq.Header.Set("Authorization", "Bearer "+c.Token)
 	processReq.Header.Set("X-Contentful-Version", fmt.Sprintf("%d", assetResult.Sys.Version))
 
-	processResp, err := c.httpClient.Do(processReq)
+	processResp, err := c.HTTPClient.Do(processReq)
 	if err != nil {
 		return "", fmt.Errorf("process asset: %w", err)
 	}
@@ -334,9 +324,8 @@ func (c *Client) UploadAvatar(ctx context.Context, imageURL, name string) (strin
 		return "", fmt.Errorf("process asset returned %d", processResp.StatusCode)
 	}
 
-	// Step 5: Poll until processed (file.url appears)
 	assetGetEndpoint := fmt.Sprintf("%s/spaces/%s/environments/master/assets/%s",
-		cmaBaseURL, c.spaceID, assetResult.Sys.ID)
+		servicekit.CMABaseURL, c.SpaceID, assetResult.Sys.ID)
 
 	var cdnURL string
 	var assetVersion int
@@ -347,21 +336,20 @@ func (c *Client) UploadAvatar(ctx context.Context, imageURL, name string) (strin
 		if err != nil {
 			return "", err
 		}
-		getReq.Header.Set("Authorization", "Bearer "+c.token)
+		getReq.Header.Set("Authorization", "Bearer "+c.Token)
 
-		getResp, err := c.httpClient.Do(getReq)
+		getResp, err := c.HTTPClient.Do(getReq)
 		if err != nil {
 			continue
 		}
 
 		var polled struct {
-			Sys    entrySys               `json:"sys"`
+			Sys    servicekit.EntrySys    `json:"sys"`
 			Fields map[string]interface{} `json:"fields"`
 		}
 		json.NewDecoder(getResp.Body).Decode(&polled)
 		getResp.Body.Close()
 
-		// Check if file has been processed (url field appears)
 		if fileField, ok := polled.Fields["file"]; ok {
 			if localeMap, ok := fileField.(map[string]interface{}); ok {
 				if enUS, ok := localeMap["en-US"].(map[string]interface{}); ok {
@@ -379,7 +367,6 @@ func (c *Client) UploadAvatar(ctx context.Context, imageURL, name string) (strin
 		return "", fmt.Errorf("asset processing timed out for %s", name)
 	}
 
-	// Step 6: Publish the asset
 	if err := c.publishAsset(ctx, assetResult.Sys.ID, assetVersion); err != nil {
 		return "", fmt.Errorf("publish asset: %w", err)
 	}
@@ -390,7 +377,6 @@ func (c *Client) UploadAvatar(ctx context.Context, imageURL, name string) (strin
 func slugify(name string) string {
 	s := strings.ToLower(strings.TrimSpace(name))
 	s = strings.ReplaceAll(s, " ", "-")
-	// Remove non-alphanumeric chars except hyphens
 	var b strings.Builder
 	for _, r := range s {
 		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
@@ -415,16 +401,16 @@ func extForContentType(ct string) string {
 
 func (c *Client) publishAsset(ctx context.Context, assetID string, version int) error {
 	endpoint := fmt.Sprintf("%s/spaces/%s/environments/master/assets/%s/published",
-		cmaBaseURL, c.spaceID, assetID)
+		servicekit.CMABaseURL, c.SpaceID, assetID)
 
 	req, err := http.NewRequestWithContext(ctx, "PUT", endpoint, nil)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("X-Contentful-Version", fmt.Sprintf("%d", version))
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -433,32 +419,6 @@ func (c *Client) publishAsset(ctx context.Context, assetID string, version int) 
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("CMA asset publish failed (%d): %s", resp.StatusCode, string(body))
-	}
-
-	return nil
-}
-
-// PublishEntry publishes a Contentful entry.
-func (c *Client) PublishEntry(ctx context.Context, entryID string, version int) error {
-	endpoint := fmt.Sprintf("%s/spaces/%s/environments/master/entries/%s/published",
-		cmaBaseURL, c.spaceID, entryID)
-
-	req, err := http.NewRequestWithContext(ctx, "PUT", endpoint, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("X-Contentful-Version", fmt.Sprintf("%d", version))
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("CMA publish failed (%d): %s", resp.StatusCode, string(body))
 	}
 
 	return nil

@@ -18,18 +18,3 @@ type TestimonialsResult struct {
 	Version      int
 	RawFields    map[string]interface{}
 }
-
-type entriesResponse struct {
-	Items []entryItem `json:"items"`
-	Total int         `json:"total"`
-}
-
-type entryItem struct {
-	Sys    entrySys               `json:"sys"`
-	Fields map[string]interface{} `json:"fields"`
-}
-
-type entrySys struct {
-	ID      string `json:"id"`
-	Version int    `json:"version"`
-}

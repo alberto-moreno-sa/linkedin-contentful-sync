@@ -4,13 +4,15 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
+	servicekit "github.com/alberto-moreno-sa/go-service-kit/contentful"
+	"github.com/alberto-moreno-sa/go-service-kit/gemini"
 	"github.com/alberto-moreno-sa/linkedin-contentful-sync/internal/config"
 	"github.com/alberto-moreno-sa/linkedin-contentful-sync/internal/contentful"
 	"github.com/alberto-moreno-sa/linkedin-contentful-sync/internal/linkedin"
 	"github.com/alberto-moreno-sa/linkedin-contentful-sync/internal/sync"
-	"github.com/alberto-moreno-sa/linkedin-contentful-sync/internal/translate"
 	"github.com/spf13/cobra"
 )
 
@@ -54,7 +56,7 @@ var scrapeCmd = &cobra.Command{
 			}
 			log.Println("Translating quotes to English...")
 			for i := range scraped {
-				translated, err := translate.ToEnglish(ctx, cfg.GeminiAPIKey, scraped[i].Quote)
+				translated, err := gemini.Translate(ctx, cfg.GeminiAPIKey, scraped[i].Quote, "English")
 				if err != nil {
 					log.Printf("WARNING: translation failed for %s: %v", scraped[i].Name, err)
 					continue
@@ -141,6 +143,61 @@ var scrapeCmd = &cobra.Command{
 		}
 
 		log.Println("Successfully synced and published.")
+
+		// Step 5: Record build log
+		log.Println("Recording build log...")
+		triggeredBy := "local"
+		if os.Getenv("GITHUB_ACTIONS") == "true" {
+			triggeredBy = "github-actions"
+		}
+
+		logEntry := servicekit.BuildLogEntry{
+			Service:         "linkedin-contentful-sync",
+			Timestamp:       time.Now().UTC().Format(time.RFC3339),
+			TriggeredBy:     triggeredBy,
+			ForceUpdate:     forceFlag,
+			TranslationUsed: translateFlag,
+			NewAdded:        len(newIndices),
+			TotalAfterSync:  len(merged),
+			Status:          "success",
+		}
+
+		buildLogResult, err := cmaClient.GetBuildLog(ctx)
+		if err != nil {
+			log.Printf("WARNING: failed to fetch build log: %v", err)
+			return nil
+		}
+
+		existing := buildLogResult.Entries
+		if len(existing) >= 3 {
+			existing = existing[len(existing)-2:]
+		}
+		allLogEntries := append(existing, logEntry)
+
+		var buildLogEntryID string
+		var buildLogVersion int
+
+		if buildLogResult.EntryID == "" {
+			buildLogEntryID, buildLogVersion, err = cmaClient.CreateBuildLog(ctx, allLogEntries)
+			if err != nil {
+				log.Printf("WARNING: failed to create build log: %v", err)
+				return nil
+			}
+		} else {
+			buildLogEntryID = buildLogResult.EntryID
+			buildLogVersion, err = cmaClient.UpdateBuildLog(ctx, buildLogResult, allLogEntries)
+			if err != nil {
+				log.Printf("WARNING: failed to update build log: %v", err)
+				return nil
+			}
+		}
+
+		if err := cmaClient.PublishEntry(ctx, buildLogEntryID, buildLogVersion); err != nil {
+			log.Printf("WARNING: failed to publish build log: %v", err)
+			return nil
+		}
+
+		log.Printf("Build log updated (%d total entries)", len(allLogEntries))
 		return nil
 	},
 }
