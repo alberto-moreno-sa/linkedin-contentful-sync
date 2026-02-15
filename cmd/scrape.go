@@ -146,13 +146,14 @@ var scrapeCmd = &cobra.Command{
 
 		// Step 5: Record build log
 		log.Println("Recording build log...")
+		const serviceName = "linkedin-contentful-sync"
 		triggeredBy := "local"
 		if os.Getenv("GITHUB_ACTIONS") == "true" {
 			triggeredBy = "github-actions"
 		}
 
 		logEntry := servicekit.BuildLogEntry{
-			Service:         "linkedin-contentful-sync",
+			Service:         serviceName,
 			Timestamp:       time.Now().UTC().Format(time.RFC3339),
 			TriggeredBy:     triggeredBy,
 			ForceUpdate:     forceFlag,
@@ -168,11 +169,18 @@ var scrapeCmd = &cobra.Command{
 			return nil
 		}
 
-		existing := buildLogResult.Entries
-		if len(existing) >= 3 {
-			existing = existing[len(existing)-2:]
+		var ownEntries, otherEntries []servicekit.BuildLogEntry
+		for _, e := range buildLogResult.Entries {
+			if e.Service == serviceName {
+				ownEntries = append(ownEntries, e)
+			} else {
+				otherEntries = append(otherEntries, e)
+			}
 		}
-		allLogEntries := append(existing, logEntry)
+		if len(ownEntries) >= 3 {
+			ownEntries = ownEntries[len(ownEntries)-2:]
+		}
+		allLogEntries := append(otherEntries, append(ownEntries, logEntry)...)
 
 		var buildLogEntryID string
 		var buildLogVersion int
